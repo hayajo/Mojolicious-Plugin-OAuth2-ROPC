@@ -1,0 +1,6 @@
+name = "Mojolicious-Plugin-OAuth2-ROPC"
+# badges = ["travis"]
+authority="cpan:HAYAJO"
+
+module_maker="ModuleBuildTiny"
+
