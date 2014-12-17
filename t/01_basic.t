@@ -5,13 +5,16 @@ use Mojolicious::Lite;
 use Test::Mojo;
 use Mojo::Util qw/hmac_sha1_sum/;
 
-my $token_db;
+my $token_db = {};
+my $scope_db = {
+    myclient => [qw| /hello /goodbye /thanks |],
+};
 
 my $oauth2_ropc_bridge = plugin 'Mojolicious::Plugin::OAuth2::ROPC',
     validate_client_handler => sub {
         my $c = shift;
         my( $client_id, $client_secret ) = @_;
-        return $client_id eq 'id' && $client_secret eq 'secret';
+        return $client_id eq 'myclient' && $client_secret eq 'mysecret';
     },
     grant_token_handler => sub {
         my $c = shift;
@@ -19,14 +22,46 @@ my $oauth2_ropc_bridge = plugin 'Mojolicious::Plugin::OAuth2::ROPC',
 
         return unless( $credentials->{username} eq 'test' && $credentials->{password} eq 'test' );
 
-        $token_db
+        my $token
           = hmac_sha1_sum( $credentials->{username}, $credentials->{password}, app->secrets->[0] );
-        return $token_db;
+
+        $token_db->{$token} = {
+            client_id => $credentials->{client_id},
+            expire    => time + $expires_in,
+        };
+
+        return $token;
+    },
+    grant_scope_handler => sub {
+        my $c = shift;
+        my( $credentials, $request_scopes ) = @_;
+
+        my( %union, %intersection );
+        my $client_scopes = $scope_db->{ $credentials->{client_id} } || [];
+        for( @$request_scopes, @$client_scopes) {
+            $union{$_}++ && $intersection{$_}++;
+        }
+
+        my @scopes = keys %intersection;
+        $token_db->{ $credentials->{token} }->{scope} = \@scopes;
+
+        return \@scopes;
     },
     auth_token_handler => sub {
         my $c = shift;
         my($token) = @_;
-        return $token eq $token_db;
+
+        return unless $token_db->{$token};
+
+        if( $token_db->{$token}->{expire} < time ) {
+            delete $token_db->{$token};
+            return;
+        }
+        elsif( !( grep { $_ eq $c->req->url->path } @{ $token_db->{$token}->{scope} } ) ) {
+            return;
+        }
+
+        return 1;
     };
 
 # non bridged
@@ -71,7 +106,7 @@ subtest 'get token', sub {
 
     subtest 'with unsupported grant type request' => sub {
         my $t   = Test::Mojo->new;
-        my $url = $t->ua->server->url->userinfo('id:secret')->path($endpoint);
+        my $url = $t->ua->server->url->userinfo('myclient:mysecret')->path($endpoint);
         $t->post_ok(
             $url,
             form => {
@@ -84,7 +119,7 @@ subtest 'get token', sub {
 
     subtest 'with unauthorized user request' => sub {
         my $t   = Test::Mojo->new;
-        my $url = $t->ua->server->url->userinfo('id:secret')->path($endpoint);
+        my $url = $t->ua->server->url->userinfo('myclient:mysecret')->path($endpoint);
         $t->post_ok(
             $url,
             form => {
@@ -97,9 +132,25 @@ subtest 'get token', sub {
         ->json_is( '/error' => 'unauthorized_client' );
     };
 
-    subtest 'with correct request' => sub {
+    subtest 'with invalid scope only' => sub {
         my $t   = Test::Mojo->new;
-        my $url = $t->ua->server->url->userinfo('id:secret')->path($endpoint);
+        my $url = $t->ua->server->url->userinfo('myclient:mysecret')->path($endpoint);
+        $t->post_ok(
+            $url,
+            form => {
+                grant_type => 'password',
+                username   => 'test',
+                password   => 'test',
+                scope      => 'hoge fuga piyo',
+            },
+        )
+        ->status_is(400)
+        ->json_is( '/error' => 'invalid_scope' );
+    };
+
+    subtest 'without scope' => sub {
+        my $t   = Test::Mojo->new;
+        my $url = $t->ua->server->url->userinfo('myclient:mysecret')->path($endpoint);
         $t->post_ok(
             $url,
             form => {
@@ -109,8 +160,25 @@ subtest 'get token', sub {
             },
         )
         ->status_is(200)
+        ->json_hasnt('/scope');
+    };
+
+    subtest 'with correct request' => sub {
+        my $t   = Test::Mojo->new;
+        my $url = $t->ua->server->url->userinfo('myclient:mysecret')->path($endpoint);
+        $t->post_ok(
+            $url,
+            form => {
+                grant_type => 'password',
+                username   => 'test',
+                password   => 'test',
+                scope      => '/hello /goodbye /thanks hoge fuga piyo',
+            },
+        )
+        ->status_is(200)
         ->json_has('/access_token')
         ->json_is( '/token_type' => 'bearer' )
+        ->json_is( '/scope'      => join( ' ', sort qw| /hello /goodbye /thanks | ) )
         ->json_has('/expires_in');
     };
 };
@@ -120,11 +188,12 @@ subtest 'bridged route', sub {
 
     my $ua = Mojo::UserAgent->new;
     my $token = $ua->post(
-        $ua->server->url->userinfo('id:secret')->path('/oauth2/token'),
+        $ua->server->url->userinfo('myclient:mysecret')->path('/oauth2/token'),
         form => {
             grant_type => 'password',
             username   => 'test',
             password   => 'test',
+            scope      => '/hello',
         }
     )->res->json('/access_token');
 

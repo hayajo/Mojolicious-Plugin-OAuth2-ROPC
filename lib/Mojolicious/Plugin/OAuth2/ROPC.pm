@@ -13,6 +13,7 @@ sub register {
     $opts->{endpoint}                ||= '/oauth2/token';
     $opts->{expires_in}              ||= 60 * 60 * 24 * 30; # 30 days
     $opts->{validate_client_handler} ||= sub { return 1 };
+    $opts->{grant_scope_handler}     ||= sub { return [] };
 
     $app->helper(
         oauth2_bearer_access_token => sub {
@@ -72,12 +73,30 @@ sub register {
                 return;
             }
 
-            oauth2_response(
-                $c,
+            my $res = {
                 access_token => $token,
                 token_type   => 'bearer',
                 expires_in   => $opts->{expires_in},
-            );
+            };
+
+            # grant_scope
+            if (my $scope = $c->param('scope')) {
+                $credentials->{token} = $token;
+                my $requested_scope = [ split( / +/, $scope || '' ) ];
+
+                my $granted_scope = $opts->{grant_scope_handler}->( $c, $credentials, $requested_scope );
+                if( ref $granted_scope ne 'ARRAY' ) {
+                    die "grant_scope_handler have to return ArrayRef.";
+                }
+                if( !@$granted_scope ) {
+                    oauth2_error( $c, error => 'invalid_scope' );
+                    return;
+                }
+
+                $res->{scope} = join( ' ', sort @$granted_scope );
+            }
+
+            oauth2_response( $c, %$res );
         }
     );
 
