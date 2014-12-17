@@ -78,6 +78,10 @@ $oauth2_ropc_bridge->any(
     }
 );
 
+# =================
+#       TEST
+# =================
+
 subtest 'non bridged route', sub {
     my $t = Test::Mojo->new;
     $t->get_ok('/')->status_is(200)->json_is( { message => 'Hello Mojo!' } );
